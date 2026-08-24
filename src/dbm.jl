@@ -4,6 +4,15 @@ export inputs_odd_to_even, inputs_even_to_odd
 export sample_even_from_odd, sample_odd_from_even
 export sample_even_from_even, sample_odd_from_odd
 
+dimserror() = throw(DimensionMismatch("inconsistent dimensions"))
+
+tail2(t::Tuple) = tail(tail(t))
+front2(t::Tuple) = front(front(t))
+
+tuplejoin() = ()
+tuplejoin(x::Tuple) = x
+tuplejoin(x::Tuple, y::Tuple, z::Tuple...) = tuplejoin((x..., y...), z...)
+
 """
     DBM
 
@@ -49,10 +58,15 @@ Converts the DBM to a tuple of RBMs.
 """
 Base.Tuple(dbm::DBM) = RBM.(front(dbm.layers), tail(dbm.layers), dbm.weights)
 
+function checkdims(layer::AbstractLayer, x::AbstractArray)
+    ndims(x) ≥ ndims(layer) || dimserror()
+    size(x)[1:ndims(layer)] == size(layer) || dimserror()
+end
+
 function checkdims(dbm::DBM, x::Tuple)
     length(dbm) == length(x) || dimserror()
-    checkdims.(dbm.layers, x)
-    allequal(batchsize.(dbm.layers, x)...) || dimserror()
+    foreach(checkdims, dbm.layers, x)
+    allequal(batch_size.(dbm.layers, x)) || dimserror()
 end
 
 """
@@ -76,7 +90,7 @@ function inputs_forw(dbm::DBM, x::Tuple, ::Val{l}) where {l}
     checkdims(dbm, x)
     l::Int
     1 ≤ l < length(dbm) || throw(BoundsError(dbm.layers, l))
-    tensormul_ff(dbm.weights[l], x[l], Val(ndims(dbm.layers[l])))
+    inputs_h_from_v(RBM(dbm, Val(l)), x[l])
 end
 
 """
@@ -88,7 +102,7 @@ function inputs_back(dbm::DBM, x::Tuple, ::Val{l}) where {l}
     checkdims(dbm, x)
     l::Int
     1 ≤ l < length(dbm) || throw(BoundsError(dbm.layers, l))
-    tensormul_lf(dbm.weights[l], x[l+1], Val(ndims(dbm.layers[l+1])))
+    inputs_v_from_h(RBM(dbm, Val(l)), x[l+1])
 end
 
 """
@@ -124,11 +138,11 @@ function inputs_odd_to_even(dbm::DBM, x::Tuple)
     elseif length(dbm) == 1
         return (nothing,)
     elseif length(dbm) == 2
-        I2 = tensormul_ff(dbm.weights[1], x[1], Val(ndims(dbm.layers[1])))
+        I2 = inputs_h_from_v(RBM(dbm, Val(1)), x[1])
         return (nothing, I2)
     else
-        If = tensormul_ff(dbm.weights[1], x[1], Val(ndims(dbm.layers[1])))
-        Ib = tensormul_lf(dbm.weights[2], x[3], Val(ndims(dbm.layers[3])))
+        If = inputs_h_from_v(RBM(dbm, Val(1)), x[1])
+        Ib = inputs_v_from_h(RBM(dbm, Val(2)), x[3])
         I2 = If + Ib
         Is = inputs_odd_to_even(tail2(dbm), tail2(x))
         return (nothing, I2, Is...)
@@ -148,58 +162,62 @@ function inputs_even_to_odd(dbm::DBM, x::Tuple)
     elseif length(dbm) == 1
         return (zero(first(x)),)
     elseif length(dbm) == 2
-        I1 = tensormul_lf(dbm.weights[1], x[2], Val(ndims(dbm.layers[2])))
+        I1 = inputs_v_from_h(RBM(dbm, Val(1)), x[2])
         return (I1, nothing)
     else
-        I1 = tensormul_lf(dbm.weights[1], x[2], Val(ndims(dbm.layers[2])))
-        If = tensormul_ff(dbm.weights[2], x[2], Val(ndims(dbm.layers[2])))
+        I1 = inputs_v_from_h(RBM(dbm, Val(1)), x[2])
+        If = inputs_h_from_v(RBM(dbm, Val(2)), x[2])
         Is = inputs_even_to_odd(tail2(dbm), tail2(x))
         return (I1, nothing, If + first(Is), tail(Is)...)
     end
 end
 
+# Keeps the current state where there is no input (`nothing`), samples otherwise.
+_sample(layer, xl, ::Nothing) = xl
+_sample(layer, xl, Il) = sample_from_inputs(layer, Il)
+
 """
-    sample_even_from_odd(dbm, x, β=1)
+    sample_even_from_odd(dbm, x)
 
 Samples even layers conditioned on the state of odd layers.
 """
-function sample_even_from_odd(dbm::DBM, x::Tuple, β=1)
+function sample_even_from_odd(dbm::DBM, x::Tuple)
     checkdims(dbm, x)
     I = inputs_odd_to_even(dbm, x)
-    ntuple(l -> isodd(l) ? x[l] : random(dbm.layers[l], I[l], β), Val(length(dbm)))
+    map(_sample, dbm.layers, x, I)
 end
 
 """
-    sample_odd_from_even(dbm, x, β=1)
+    sample_odd_from_even(dbm, x)
 
 Samples odd layers conditioned on the state of even layers.
 """
-function sample_odd_from_even(dbm::DBM, x::Tuple, β=1)
+function sample_odd_from_even(dbm::DBM, x::Tuple)
     checkdims(dbm, x)
     I = inputs_even_to_odd(dbm, x)
-    ntuple(l -> iseven(l) ? x[l] : random(dbm.layers[l], I[l], β), Val(length(dbm)))
+    map(_sample, dbm.layers, x, I)
 end
 
 """
-    sample_even_from_even(dbm, x, β=1)
+    sample_even_from_even(dbm, x)
 
 Samples odd layers from even layers, then even layers from odd layers.
 """
-function sample_even_from_even(dbm::DBM, x::Tuple, β=1)
+function sample_even_from_even(dbm::DBM, x::Tuple)
     length(x) == length(dbm) || dimserror()
-    x = sample_odd_from_even(dbm, x, β)
-    x = sample_even_from_odd(dbm, x, β)
+    x = sample_odd_from_even(dbm, x)
+    x = sample_even_from_odd(dbm, x)
     return x
 end
 
 """
-    sample_odd_from_odd(dbm, x, β=1)
+    sample_odd_from_odd(dbm, x)
 
 Samples even layers from odd layers, then odd layers from even layers.
 """
-function sample_odd_from_odd(dbm::DBM, x::Tuple, β=1)
+function sample_odd_from_odd(dbm::DBM, x::Tuple)
     length(dbm.layers) == length(x) || dimserror()
-    x = sample_even_from_odd(dbm, x, β)
-    x = sample_odd_from_even(dbm, x, β)
+    x = sample_even_from_odd(dbm, x)
+    x = sample_odd_from_even(dbm, x)
     return x
 end
