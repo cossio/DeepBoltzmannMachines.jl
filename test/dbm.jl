@@ -1,11 +1,12 @@
 using Base: tail, front
 using Test, Random
-using RestrictedBoltzmannMachines
+using RestrictedBoltzmannMachines: Binary, RBM, energy, inputs_h_from_v, inputs_v_from_h
+using DeepBoltzmannMachines
 
 n = ((3,2,4), (4,3), (2,3))
 B = 3
 
-dbm = DBM((Binary(nl...) for nl in n)...)
+dbm = DBM((Binary(nl) for nl in n)...)
 randn!.(dbm.weights)
 for layer in dbm.layers
     randn!(layer.θ)
@@ -44,11 +45,11 @@ for l = 1:length(dbm)
     end
 end
 
-@test I[1] ≈ inputs_h_to_v(rbms[1], x[2])
+@test I[1] ≈ inputs_v_from_h(rbms[1], x[2])
 for l = 2:length(dbm)-1
-    @test I[l] ≈ inputs_v_to_h(rbms[l-1], x[l-1]) + inputs_h_to_v(rbms[l], x[l+1])
+    @test I[l] ≈ inputs_h_from_v(rbms[l-1], x[l-1]) + inputs_v_from_h(rbms[l], x[l+1])
 end
-@test I[end] ≈ inputs_v_to_h(rbms[end], x[end-1])
+@test I[end] ≈ inputs_h_from_v(rbms[end], x[end-1])
 
 @inferred inputs_even_to_odd(dbm, x)
 @inferred inputs_odd_to_even(dbm, x)
